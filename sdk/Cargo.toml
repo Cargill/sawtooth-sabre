@@ -14,8 +14,8 @@
 
 [package]
 name = "sabre-sdk"
-version = "0.1.0"
+version = "0.1.3"
 authors = ["Cargill, Incorporated"]
 
 [dependencies]
-protobuf = "1.4"
+protobuf = "2"

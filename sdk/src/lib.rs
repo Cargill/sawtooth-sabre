@@ -11,12 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 extern crate protobuf;
+
 mod externs;
 
 use std::error::Error;
 use std::string::FromUtf8Error;
+use std::collections::HashMap;
 pub use externs::{WasmPtr, WasmPtrList};
 
 pub struct Header {
@@ -36,11 +37,12 @@ impl Header {
 pub struct TpProcessRequest<'a> {
     payload: Vec<u8>,
     header: &'a mut Header,
+    signature: String
 }
 
 impl<'a> TpProcessRequest<'a> {
-    pub fn new(payload: Vec<u8>, header: &'a mut Header) -> TpProcessRequest {
-        TpProcessRequest { payload, header }
+    pub fn new(payload: Vec<u8>, header: &'a mut Header, signature: String) -> TpProcessRequest {
+        TpProcessRequest { payload, header, signature }
     }
 
     pub fn get_payload(&self) -> &[u8] {
@@ -50,6 +52,10 @@ impl<'a> TpProcessRequest<'a> {
     pub fn get_header(&self) -> &Header {
         return self.header;
     }
+
+    pub fn get_signature(&self) -> String {
+        return self.signature.to_string()
+    }
 }
 
 pub struct TransactionContext {}
@@ -58,22 +64,70 @@ impl TransactionContext {
     pub fn new() -> TransactionContext {
         TransactionContext {}
     }
-    pub fn get_state(&self, address: &str) -> Result<Option<Vec<u8>>, WasmSdkError> {
+    pub fn get_state(&self, addresses: Vec<String>) -> Result<Option<Vec<u8>>, WasmSdkError> {
         unsafe {
-            let wasm_buffer = WasmBuffer::new(address.to_string().as_bytes())?;
-            ptr_to_vec(externs::get_state(wasm_buffer.into_raw()))
+            if addresses.is_empty(){
+                return Err(WasmSdkError::InvalidTransaction(
+                    "No address to delete".into(),
+                ));
+            }
+            let head = &addresses[0];
+            let header_address_buffer = WasmBuffer::new(head.as_bytes())?;
+            externs::create_collection(header_address_buffer.into_raw());
+
+            for addr in addresses[1..].iter() {
+                let wasm_buffer = WasmBuffer::new(addr.as_bytes())?;
+                externs::add_to_collection(
+                    header_address_buffer.into_raw(), wasm_buffer.into_raw());
+            };
+            ptr_to_vec(externs::get_state(header_address_buffer.into_raw()))
         }
     }
 
-    pub fn set_state(&self, address: &str, state: &[u8]) -> Result<(), WasmSdkError> {
+    pub fn set_state(&self,  entries: HashMap<String, Vec<u8>>) -> Result<(), WasmSdkError> {
+        for (address, state) in entries.iter() {
+            unsafe {
+                let wasm_address_buffer = WasmBuffer::new(address.to_string().as_bytes())?;
+                let wasm_state_buffer = WasmBuffer::new(&state)?;
+                let result = externs::set_state(
+                    wasm_address_buffer.into_raw(),
+                    wasm_state_buffer.into_raw(),
+                );
+
+                if result == 0 {
+                    return Err(WasmSdkError::InvalidTransaction(
+                        "Unable to set state".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn delete_state(&self, addresses: Vec<String>) -> Result<Option<Vec<String>>, WasmSdkError> {
         unsafe {
-            let wasm_address_buffer = WasmBuffer::new(address.to_string().as_bytes())?;
-            let wasm_state_buffer = WasmBuffer::new(state)?;
-            ptr_to_vec(externs::set_state(
-                wasm_address_buffer.into_raw(),
-                wasm_state_buffer.into_raw(),
-            ))?;
-            Ok(())
+            if addresses.is_empty(){
+                return Err(WasmSdkError::InvalidTransaction(
+                    "No address to delte".into(),
+                ));
+            }
+            let head = &addresses[0];
+            let header_address_buffer = WasmBuffer::new(head.as_bytes())?;
+            externs::create_collection(header_address_buffer.into_raw());
+
+            for addr in addresses[1..].iter() {
+                let wasm_buffer = WasmBuffer::new(addr.as_bytes())?;
+                externs::add_to_collection(
+                    header_address_buffer.into_raw(), wasm_buffer.into_raw());
+            };
+            let result = WasmBuffer::from_list(
+                    externs::delete_state(header_address_buffer.into_raw()))?;
+            let mut result_vec = Vec::new();
+            for i in result {
+                let addr = String::from_utf8(i.data)?;
+                result_vec.push(addr);
+            }
+            Ok(Some(result_vec))
         }
     }
 }
@@ -94,12 +148,21 @@ pub trait TransactionHandler {
 /// -2: Failed to deserialize signer
 /// -3: apply returned InvalidTransaction
 /// -4: apply returned InternalError
-pub unsafe fn execute_entrypoint<F>(payload_ptr: WasmPtr, signer_ptr: WasmPtr, apply: F) -> i32
+pub unsafe fn execute_entrypoint<F>(payload_ptr: WasmPtr, signer_ptr: WasmPtr, signature_ptr: WasmPtr, apply: F) -> i32
 where
     F: Fn(&TpProcessRequest, &mut TransactionContext) -> Result<bool, ApplyError>,
 {
     let payload = if let Ok(i) = WasmBuffer::from_raw(payload_ptr) {
         i.into_bytes()
+    } else {
+        return -1;
+    };
+
+    let signature = if let Ok(i) = WasmBuffer::from_raw(signature_ptr) {
+        match i.into_string() {
+            Ok(s) => s,
+            Err(_) => return -2,
+        }
     } else {
         return -1;
     };
@@ -115,7 +178,7 @@ where
 
     let mut header = Header::new(signer);
     match apply(
-        &TpProcessRequest::new(payload, &mut header),
+        &TpProcessRequest::new(payload, &mut header, signature),
         &mut TransactionContext::new(),
     ) {
         Ok(r) => if r {
@@ -254,7 +317,7 @@ pub enum ApplyError {
 impl std::fmt::Display for ApplyError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match *self {
-            ApplyError::InvalidTransaction(ref s) => write!(f, "InvalidTransactio: {}", s),
+            ApplyError::InvalidTransaction(ref s) => write!(f, "InvalidTransaction: {}", s),
             ApplyError::InternalError(ref s) => write!(f, "InternalError: {}", s),
         }
     }
