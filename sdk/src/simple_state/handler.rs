@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::simple_state::addresser::Addresser;
-use crate::{ApplyError, TpProcessRequest, TransactionContext};
+use crate::{ApplyError, TpProcessRequest, TransactionContext, TransactionHandler};
 
 pub trait SimpleTransactionHandler {
     type Key;
@@ -32,4 +32,29 @@ pub trait SimpleTransactionHandler {
         _addresser: Box<&dyn Addresser<Self::Key>>,
         _context: &mut dyn TransactionContext,
     ) -> Result<(), ApplyError>;
+}
+
+impl<T> TransactionHandler for T
+where
+    T: SimpleTransactionHandler,
+{
+    fn family_name(&self) -> String {
+        self.get_family_name()
+    }
+
+    fn family_versions(&self) -> Vec<String> {
+        self.get_family_versions()
+    }
+
+    fn namespaces(&self) -> Vec<String> {
+        self.get_namespaces()
+    }
+
+    fn apply(
+        &self,
+        request: &TpProcessRequest,
+        context: &mut dyn TransactionContext,
+    ) -> Result<(), ApplyError> {
+        self.apply(request, self.get_addresser(), context)
+    }
 }
